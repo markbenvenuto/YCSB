@@ -16,6 +16,8 @@
       <groupId>org.mongodb</groupId>
       <artifactId>mongodb-driver-sync</artifactId>
       <version>${mongodb.version}</version>
+      <!--      <scope>system</scope>
+      <systemPath>/home/mark/src/mongo-java-driver/driver-sync/build/libs/mongodb-driver-sync-4.7.0-SNAPSHOT.jar</systemPath>-->  
     </dependency>
     <dependency>
       <groupId>com.yahoo.ycsb</groupId>

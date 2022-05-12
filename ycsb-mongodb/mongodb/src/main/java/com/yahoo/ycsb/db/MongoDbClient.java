@@ -34,6 +34,7 @@ import com.yahoo.ycsb.DB;
 import org.bson.BsonBinary;
 import org.bson.BsonDocument;
 import org.bson.Document;
+import org.bson.codecs.configuration.CodecRegistry;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -48,31 +49,38 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.Vector;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.bson.*;
+import com.mongodb.client.result.InsertOneResult;
+
+import java.security.SecureRandom;
+import java.util.Arrays;
 
 class UuidUtils {
 
     public static byte[] asBytes(UUID uuid) {
-      ByteBuffer bb = ByteBuffer.wrap(new byte[16]);
-      bb.putLong(uuid.getMostSignificantBits());
-      bb.putLong(uuid.getLeastSignificantBits());
-      return bb.array();
+        ByteBuffer bb = ByteBuffer.wrap(new byte[16]);
+        bb.putLong(uuid.getMostSignificantBits());
+        bb.putLong(uuid.getLeastSignificantBits());
+        return bb.array();
     }
-  }
+}
 
 /**
  * MongoDB client for YCSB framework.
  *
  * Properties to set:
  *
- * mongodb.url=mongodb://localhost:27017 mongodb.database=ycsb mongodb.writeConcern=acknowledged
+ * mongodb.url=mongodb://localhost:27017 mongodb.database=ycsb
+ * mongodb.writeConcern=acknowledged
  * For replica set use:
  * mongodb.url=mongodb://hostname:27017?replicaSet=nameOfYourReplSet
- * to pass connection to multiple mongos end points to round-robin between them, separate
+ * to pass connection to multiple mongos end points to round-robin between them,
+ * separate
  * hostnames with "|" character
  *
  * @author ypai
  */
-@SuppressWarnings({"UnnecessaryToStringCall", "StringConcatenationInsideStringBufferAppend"})
+@SuppressWarnings({ "UnnecessaryToStringCall", "StringConcatenationInsideStringBufferAppend" })
 public class MongoDbClient extends DB {
 
     /** Used to include a field in a response. */
@@ -81,7 +89,7 @@ public class MongoDbClient extends DB {
     /** A singleton MongoClient instance. */
     private static MongoClient[] mongo;
 
-    private static MongoDatabase[] db;                               
+    private static MongoDatabase[] db;
 
     private static int serverCounter = 0;
 
@@ -99,44 +107,54 @@ public class MongoDbClient extends DB {
     /** The database to access. */
     private static String database;
 
-    /** Count the number of times initialized to teardown on the last {@link #cleanup()}. */
+    /**
+     * Count the number of times initialized to teardown on the last
+     * {@link #cleanup()}.
+     */
     private static final AtomicInteger initCount = new AtomicInteger(0);
 
-    /** Measure of how compressible the data is, compressibility=10 means the data can compress tenfold.
-     *  The default is 1, which is uncompressible */
+    /**
+     * Measure of how compressible the data is, compressibility=10 means the data
+     * can compress tenfold.
+     * The default is 1, which is uncompressible
+     */
     private static float compressibility = (float) 1.0;
 
     private static String datatype = "binData";
 
     private static final String algorithm = "AEAD_AES_256_CBC_HMAC_SHA_512-Random";
 
+    private static final boolean isFLE2 = true;
+
+    private static String idField = "_id";
+
     private static String generateSchema(String keyId, int numFields) {
         StringBuilder schema = new StringBuilder();
 
         schema.append(
-            "{" +
-            "  properties: {" );
+                "{" +
+                        "  properties: {");
 
-        for(int i =0; i < numFields; i++) {
+        for (int i = 0; i < numFields; i++) {
             schema.append(
-                "    field" + i + ": {" +
-                "      encrypt: {" +
-                "        keyId: [{" +
-                "          \"$binary\": {" +
-                "            \"base64\": \"" + keyId + "\"," +
-                "            \"subType\": \"04\"" +
-                "          }" +
-                "        }]," +
-                "        bsonType: \"" + datatype  +  "\"," +
-                "        algorithm: \"" + algorithm + "\"" +
-                "      }" +
-                "    },");
+                    "    field" + i + ": {" +
+                            "      encrypt: {" +
+                            "        keyId: [{" +
+                            "          \"$binary\": {" +
+                            "            \"base64\": \"" + keyId + "\"," +
+                            "            \"subType\": \"04\"" +
+                            "          }" +
+                            "        }]," +
+                            "        bsonType: \"" + datatype + "\"," +
+                            "        algorithm: \"" + algorithm + "\"" +
+                            "      }" +
+                            "    },");
         }
 
         schema.append(
-            "  }," +
-            "  \"bsonType\": \"object\"" +
-            "}");
+                "  }," +
+                        "  \"bsonType\": \"object\"" +
+                        "}");
 
         return schema.toString();
     }
@@ -145,12 +163,13 @@ public class MongoDbClient extends DB {
         return "{ $jsonSchema : " + generateSchema(keyId, numFields) + "}";
     }
 
-    private static synchronized String getDataKeyOrCreate(MongoCollection<Document> keyCollection, ClientEncryption clientEncryption ) {
+    private static synchronized String getDataKeyOrCreate(MongoCollection<Document> keyCollection,
+            ClientEncryption clientEncryption) {
         Document findFilter = new Document();
         Document keyDoc = keyCollection.find(findFilter).first();
 
         String base64DataKeyId;
-        if(keyDoc == null ) {
+        if (keyDoc == null) {
             BsonBinary dataKeyId = clientEncryption.createDataKey("local", new DataKeyOptions());
             base64DataKeyId = Base64.getEncoder().encodeToString(dataKeyId.getData());
         } else {
@@ -161,19 +180,35 @@ public class MongoDbClient extends DB {
         return base64DataKeyId;
     }
 
-    private static AutoEncryptionSettings generateEncryptionSettings(String url, Boolean remote_schema, int numFields) {
-        // Use a hard coded local key since it needs to be shared between load and run phases
-        byte[] localMasterKey = new byte[]{0x77, 0x1f, 0x2d, 0x7d, 0x76, 0x74, 0x39, 0x08, 0x50, 0x0b, 0x61, 0x14,
-            0x3a, 0x07, 0x24, 0x7c, 0x37, 0x7b, 0x60, 0x0f, 0x09, 0x11, 0x23, 0x65,
-            0x35, 0x01, 0x3a, 0x76, 0x5f, 0x3e, 0x4b, 0x6a, 0x65, 0x77, 0x21, 0x6d,
-            0x34, 0x13, 0x24, 0x1b, 0x47, 0x73, 0x21, 0x5d, 0x56, 0x6a, 0x38, 0x30,
-            0x6d, 0x5e, 0x79, 0x1b, 0x25, 0x4d, 0x2a, 0x00, 0x7c, 0x0b, 0x65, 0x1d,
-            0x70, 0x22, 0x22, 0x61, 0x2e, 0x6a, 0x52, 0x46, 0x6a, 0x43, 0x43, 0x23,
-            0x58, 0x21, 0x78, 0x59, 0x64, 0x35, 0x5c, 0x23, 0x00, 0x27, 0x43, 0x7d,
-            0x50, 0x13, 0x65, 0x3c, 0x54, 0x1e, 0x74, 0x3c, 0x3b, 0x57, 0x21, 0x1a};
+    private static synchronized UUID getDataKeyOrCreateUUID(MongoCollection<Document> keyCollection,
+            ClientEncryption clientEncryption) {
+        Document findFilter = new Document();
+        Document keyDoc = keyCollection.find(findFilter).first();
 
-        Map<String, Map<String, Object>> kmsProviders =
-            Collections.singletonMap("local", Collections.singletonMap("key", localMasterKey));
+        String base64DataKeyId;
+        if (keyDoc == null) {
+            BsonBinary dataKeyId = clientEncryption.createDataKey("local", new DataKeyOptions());
+
+            return dataKeyId.asUuid();
+        } else {
+            return (UUID) keyDoc.get("_id");
+        }
+    }
+
+    private static AutoEncryptionSettings generateEncryptionSettings(String url, Boolean remote_schema, int numFields) {
+        // Use a hard coded local key since it needs to be shared between load and run
+        // phases
+        byte[] localMasterKey = new byte[] { 0x77, 0x1f, 0x2d, 0x7d, 0x76, 0x74, 0x39, 0x08, 0x50, 0x0b, 0x61, 0x14,
+                0x3a, 0x07, 0x24, 0x7c, 0x37, 0x7b, 0x60, 0x0f, 0x09, 0x11, 0x23, 0x65,
+                0x35, 0x01, 0x3a, 0x76, 0x5f, 0x3e, 0x4b, 0x6a, 0x65, 0x77, 0x21, 0x6d,
+                0x34, 0x13, 0x24, 0x1b, 0x47, 0x73, 0x21, 0x5d, 0x56, 0x6a, 0x38, 0x30,
+                0x6d, 0x5e, 0x79, 0x1b, 0x25, 0x4d, 0x2a, 0x00, 0x7c, 0x0b, 0x65, 0x1d,
+                0x70, 0x22, 0x22, 0x61, 0x2e, 0x6a, 0x52, 0x46, 0x6a, 0x43, 0x43, 0x23,
+                0x58, 0x21, 0x78, 0x59, 0x64, 0x35, 0x5c, 0x23, 0x00, 0x27, 0x43, 0x7d,
+                0x50, 0x13, 0x65, 0x3c, 0x54, 0x1e, 0x74, 0x3c, 0x3b, 0x57, 0x21, 0x1a };
+
+        Map<String, Map<String, Object>> kmsProviders = Collections.singletonMap("local",
+                Collections.singletonMap("key", localMasterKey));
 
         // Use the same database, admin is slow
         String keyVaultNamespace = database + ".datakeys";
@@ -183,49 +218,104 @@ public class MongoDbClient extends DB {
         }
 
         ClientEncryptionSettings clientEncryptionSettings = ClientEncryptionSettings.builder()
-        .keyVaultMongoClientSettings(MongoClientSettings.builder()
-                .applyConnectionString(new ConnectionString(keyVaultUrls))
-                .readPreference(readPreference)
-                .writeConcern(writeConcern)
-                .build())
-        .keyVaultNamespace(keyVaultNamespace)
-        .kmsProviders(kmsProviders)
-        .build();
+                .keyVaultMongoClientSettings(MongoClientSettings.builder()
+                        .applyConnectionString(new ConnectionString(keyVaultUrls))
+                        .readPreference(readPreference)
+                        .writeConcern(writeConcern)
+                        .build())
+                .keyVaultNamespace(keyVaultNamespace)
+                .kmsProviders(kmsProviders)
+                .build();
 
         ClientEncryption clientEncryption = ClientEncryptions.create(clientEncryptionSettings);
 
-        MongoClient vaultClient = MongoClients.create(keyVaultUrls);
+        MongoClientSettings clientSettings = MongoClientSettings.builder()
+                .applyConnectionString(new ConnectionString(keyVaultUrls))
+                .uuidRepresentation(UuidRepresentation.STANDARD).build();
 
-        final MongoCollection<Document> keyCollection = vaultClient.getDatabase(database).getCollection(keyVaultNamespace);
+        MongoClient vaultClient = MongoClients.create(clientSettings);
+
+        final MongoCollection<Document> keyCollection = vaultClient.getDatabase(database)
+                .getCollection(keyVaultNamespace);
 
         String base64DataKeyId = getDataKeyOrCreate(keyCollection, clientEncryption);
 
         String collName = "usertable";
         AutoEncryptionSettings.Builder autoEncryptionSettingsBuilder = AutoEncryptionSettings.builder()
-            .keyVaultNamespace(keyVaultNamespace)
-            .extraOptions(Collections.singletonMap("mongocryptdBypassSpawn", true) )
-            .kmsProviders(kmsProviders);
+                .keyVaultNamespace(keyVaultNamespace)
+                .extraOptions(Collections.singletonMap("mongocryptdBypassSpawn", true))
+                .kmsProviders(kmsProviders);
 
-        autoEncryptionSettingsBuilder.schemaMap(Collections.singletonMap(database + "." + collName,
-            // Need a schema that references the new data key
-            BsonDocument.parse(generateSchema(base64DataKeyId, numFields))
-        ));
+        if (!isFLE2) {
+            autoEncryptionSettingsBuilder.schemaMap(Collections.singletonMap(database + "." + collName,
+                    // Need a schema that references the new data key
+                    BsonDocument.parse(generateSchema(base64DataKeyId, numFields))));
+        }
 
         AutoEncryptionSettings autoEncryptionSettings = autoEncryptionSettingsBuilder.build();
 
         if (remote_schema) {
-            com.mongodb.client.MongoClient client = com.mongodb.client.MongoClients.create(keyVaultUrls);
-            CreateCollectionOptions options = new CreateCollectionOptions();
-            options.getValidationOptions().validator(BsonDocument.parse(generateRemoteSchema(base64DataKeyId, numFields)));
-            try {
-                client.getDatabase(database).createCollection(collName,  options);
-            } catch (com.mongodb.MongoCommandException e) {
-                // if this is load phase, then should error, if it's run then should ignore
-                // how to tell properly?
-                if (client.getDatabase(database).getCollection(collName).estimatedDocumentCount() <= 0) {
-                   System.err.println("ERROR: Failed to create collection " + collName + " with error " + e);
-                   e.printStackTrace();
-                   System.exit(1);
+            if (isFLE2) {
+                // Use an alternate _id field for FLE 2
+                idField = "id";
+                com.mongodb.client.MongoClient client = com.mongodb.client.MongoClients.create(clientSettings);
+                CodecRegistry codec = client.getDatabase(database).getCodecRegistry();
+
+                MongoCursor<String> collections = client.getDatabase(database).listCollectionNames().iterator();
+                boolean hasColl = false;
+                while (collections.hasNext()) {
+                    String c = collections.next();
+                    System.out.println("coll: " + c);
+                    if (c.equals(collName)) {
+                        hasColl = true;
+                    }
+                }
+                System.out.println("HasColl:" + hasColl);
+
+                if (!hasColl) {
+                    UUID dataKeyId = getDataKeyOrCreateUUID(keyCollection, clientEncryption);
+
+                    BsonDocument createEDCCommand = new BsonDocument("create", new BsonString(collName));
+                    createEDCCommand.append("encryptedFields",
+                            new Document("fields", Arrays.asList(
+                                    new Document("path", "id")
+                                            .append("keyId", dataKeyId)
+                                            .append("bsonType", "string")
+                                            .append("queries", Arrays.asList(new Document("queryType", "equality")))))
+                                    .toBsonDocument(null, codec));
+                    Document createEDCCommandResult = client.getDatabase(database).runCommand(createEDCCommand);
+                    // throw new NullPointerException();
+
+                    // String collectionNames[] = {"esc", "ecc", "ecoc"};
+
+                    // for (String name : collectionNames) {
+                    // var command = new BsonDocument("create", new BsonString( "enxcol_." +
+                    // collName + "."+name));
+                    // command.append("clusteredIndex",
+                    // new Document("key",
+                    // new Document("_id", 1)).append("unique", true)
+                    // .toBsonDocument());
+
+                    // Document commandResult = rawDatabase.runCommand(command);
+                    // System.out.println("create: " + name + " : " + commandResult.toJson());
+                    // }
+                }
+
+            } else {
+                com.mongodb.client.MongoClient client = com.mongodb.client.MongoClients.create(keyVaultUrls);
+                CreateCollectionOptions options = new CreateCollectionOptions();
+                options.getValidationOptions()
+                        .validator(BsonDocument.parse(generateRemoteSchema(base64DataKeyId, numFields)));
+                try {
+                    client.getDatabase(database).createCollection(collName, options);
+                } catch (com.mongodb.MongoCommandException e) {
+                    // if this is load phase, then should error, if it's run then should ignore
+                    // how to tell properly?
+                    if (client.getDatabase(database).getCollection(collName).estimatedDocumentCount() <= 0) {
+                        System.err.println("ERROR: Failed to create collection " + collName + " with error " + e);
+                        e.printStackTrace();
+                        System.exit(1);
+                    }
                 }
             }
         }
@@ -259,7 +349,7 @@ public class MongoDbClient extends DB {
             BATCHSIZE = Integer.parseInt(batchSizeString);
 
             // allow "string" in addition to "byte" array for data type
-            datatype = props.getProperty("datatype","binData");
+            datatype = props.getProperty("datatype", "binData");
 
             final String compressibilityString = props.getProperty("compressibility", "1");
             compressibility = Float.parseFloat(compressibilityString);
@@ -319,53 +409,57 @@ public class MongoDbClient extends DB {
             }
 
             // encryption - FLE
-            boolean use_encryption = Boolean.parseBoolean(props.getProperty("mongodb.fle", "false"));
-            boolean remote_schema = Boolean.parseBoolean(props.getProperty("mongodb.remote_schema", "false"));
+            boolean use_encryption = true; // Boolean.parseBoolean(props.getProperty("mongodb.fle", "false"));
+            boolean remote_schema = true; // Boolean.parseBoolean(props.getProperty("mongodb.remote_schema", "false"));
             int numEncryptFields = Integer.parseInt(props.getProperty("mongodb.numFleFields", "10"));
 
             try {
                 MongoClientSettings.Builder settingsBuilder = MongoClientSettings.builder();
                 // Need to use a larger connection pool to talk to mongocryptd/keyvault
                 if (use_encryption) {
-                    settingsBuilder.applyToConnectionPoolSettings(builder -> builder.maxSize(Integer.parseInt(maxConnections) * 3));
+                    settingsBuilder.applyToConnectionPoolSettings(
+                            builder -> builder.maxSize(Integer.parseInt(maxConnections) * 3));
                 } else {
-                    settingsBuilder.applyToConnectionPoolSettings(builder -> builder.maxSize(Integer.parseInt(maxConnections)));
+                    settingsBuilder.applyToConnectionPoolSettings(
+                            builder -> builder.maxSize(Integer.parseInt(maxConnections)));
                 }
                 settingsBuilder.writeConcern(writeConcern);
                 settingsBuilder.readPreference(readPreference);
 
-                String userPassword = username.equals("") ? "" : username + (password.equals("") ? "" : ":" + password) + "@";
+                String userPassword = username.equals("") ? ""
+                        : username + (password.equals("") ? "" : ":" + password) + "@";
 
                 String[] server = urls.split("\\|"); // split on the "|" character
                 mongo = new MongoClient[server.length];
                 db = new MongoDatabase[server.length];
 
-                for (int i=0; i<server.length; i++) {
-                   String url= userPassword.equals("") ? server[i] : server[i].replace("://","://"+userPassword);
-                   if ( i==0 && use_encryption) {
-                       AutoEncryptionSettings autoEncryptionSettings = generateEncryptionSettings(url, remote_schema, numEncryptFields);
-                       settingsBuilder.autoEncryptionSettings(autoEncryptionSettings);
-                   }
+                for (int i = 0; i < server.length; i++) {
+                    String url = userPassword.equals("") ? server[i] : server[i].replace("://", "://" + userPassword);
+                    if (i == 0 && use_encryption) {
+                        AutoEncryptionSettings autoEncryptionSettings = generateEncryptionSettings(url, remote_schema,
+                                numEncryptFields);
+                        settingsBuilder.autoEncryptionSettings(autoEncryptionSettings);
+                    }
 
-                   // if mongodb:// prefix is present then this is MongoClientURI format
-                   // combine with options to get MongoClient
-                   if (url.startsWith("mongodb://") || url.startsWith("mongodb+srv://") ) {
-                       settingsBuilder.applyConnectionString(new ConnectionString(url));
-                       mongo[i] = MongoClients.create(settingsBuilder.build());
+                    // if mongodb:// prefix is present then this is MongoClientURI format
+                    // combine with options to get MongoClient
+                    if (url.startsWith("mongodb://") || url.startsWith("mongodb+srv://")) {
+                        settingsBuilder.applyConnectionString(new ConnectionString(url));
+                        mongo[i] = MongoClients.create(settingsBuilder.build());
 
-                       String dispURI = userPassword.equals("")
-                               ? url
-                               : url.replace(":" + userPassword, ":XXXXXX");
-                       System.out.println("DEBUG mongo connection created to " + dispURI);
-                   } else {
-                       settingsBuilder.applyToClusterSettings(builder ->
-                               builder.hosts(Collections.singletonList(new ServerAddress(url))));
-                       mongo[i] = MongoClients.create(settingsBuilder.build());
-                       System.out.println("DEBUG mongo server connection to " + mongo[i].toString());
-                   }
-                   db[i] = mongo[i].getDatabase(database);
+                        String dispURI = userPassword.equals("")
+                                ? url
+                                : url.replace(":" + userPassword, ":XXXXXX");
+                        System.out.println("DEBUG mongo connection created to " + dispURI);
+                    } else {
+                        settingsBuilder.applyToClusterSettings(
+                                builder -> builder.hosts(Collections.singletonList(new ServerAddress(url))));
+                        mongo[i] = MongoClients.create(settingsBuilder.build());
+                        System.out.println("DEBUG mongo server connection to " + mongo[i].toString());
+                    }
+                    db[i] = mongo[i].getDatabase(database);
 
-                 }
+                }
             } catch (Exception e1) {
                 System.err.println("Could not initialize MongoDB connection pool for Loader: " + e1);
                 e1.printStackTrace();
@@ -384,17 +478,18 @@ public class MongoDbClient extends DB {
             for (MongoClient mongoClient : mongo) {
                 try {
                     mongoClient.close();
-                } catch (Exception e1) { /* ignore */ }
+                } catch (Exception e1) {
+                    /* ignore */ }
             }
         }
     }
 
-    private byte[] applyCompressibility(byte[] data){
+    private byte[] applyCompressibility(byte[] data) {
         long string_length = data.length;
 
-        long random_string_length = Math.round(string_length /compressibility);
+        long random_string_length = Math.round(string_length / compressibility);
         long compressible_len = string_length - random_string_length;
-        for(int i=0;i<compressible_len;i++)
+        for (int i = 0; i < compressible_len; i++)
             data[i] = 97;
         return data;
     }
@@ -403,18 +498,18 @@ public class MongoDbClient extends DB {
      * Delete a record from the database.
      *
      * @param table The name of the table
-     * @param key The record key of the record to delete.
-     * @return Zero on success, a non-zero error code on error. See this class's description for a discussion of error codes.
+     * @param key   The record key of the record to delete.
+     * @return Zero on success, a non-zero error code on error. See this class's
+     *         description for a discussion of error codes.
      */
     @Override
     public int delete(String table, String key) {
         try {
-            MongoCollection<Document> collection = db[serverCounter++%db.length].getCollection(table);
-            Document q = new Document("_id", key);
+            MongoCollection<Document> collection = db[serverCounter++ % db.length].getCollection(table);
+            Document q = new Document(idField, key);
             collection.deleteMany(q);
             return 0;
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             System.err.println(e.toString());
             e.printStackTrace();
             return 1;
@@ -422,75 +517,76 @@ public class MongoDbClient extends DB {
     }
 
     /**
-     * Insert a record in the database. Any field/value pairs in the specified values HashMap will be written into the record with the specified
+     * Insert a record in the database. Any field/value pairs in the specified
+     * values HashMap will be written into the record with the specified
      * record key.
      *
-     * @param table The name of the table
-     * @param key The record key of the record to insert.
+     * @param table  The name of the table
+     * @param key    The record key of the record to insert.
      * @param values A HashMap of field/value pairs to insert in the record
-     * @return Zero on success, a non-zero error code on error. See this class's description for a discussion of error codes.
+     * @return Zero on success, a non-zero error code on error. See this class's
+     *         description for a discussion of error codes.
      */
     @Override
     public int insert(String table, String key,
             HashMap<String, ByteIterator> values) {
-        MongoCollection<Document> collection = db[serverCounter++%db.length].getCollection(table);
-        Document r = new Document("_id", key);
+        MongoCollection<Document> collection = db[serverCounter++ % db.length].getCollection(table);
+        Document r = new Document(idField, key);
         for (String k : values.keySet()) {
             byte[] data = values.get(k).toArray();
             if (datatype.equals("string")) {
                 r.put(k, new String(applyCompressibility(data)));
             } else {
-                r.put(k,applyCompressibility(data));
+                r.put(k, applyCompressibility(data));
             }
         }
-        if (BATCHSIZE == 1 ) {
-           try {
-             collection.insertOne(r);
-             return 0;
-           }
-           catch (Exception e) {
-             System.err.println("Couldn't insert key " + key);
-             e.printStackTrace();
-             return 1;
-           }
+        if (BATCHSIZE == 1) {
+            try {
+                collection.insertOne(r);
+                return 0;
+            } catch (Exception e) {
+                System.err.println("Couldn't insert key " + key);
+                e.printStackTrace();
+                return 1;
+            }
         }
         if (insertCount == 0) {
-           insertList = new ArrayList<>(BATCHSIZE);
+            insertList = new ArrayList<>(BATCHSIZE);
         }
         insertCount++;
         insertList.add(r);
         if (insertCount < BATCHSIZE) {
             return 0;
         } else {
-           try {
-             collection.insertMany(insertList);
-             insertCount = 0;
-             return 0;
-           }
-           catch (Exception e) {
-             System.err.println("Exception while trying bulk insert with " + insertCount);
-             e.printStackTrace();
-             return 1;
-           }
+            try {
+                collection.insertMany(insertList);
+                insertCount = 0;
+                return 0;
+            } catch (Exception e) {
+                System.err.println("Exception while trying bulk insert with " + insertCount);
+                e.printStackTrace();
+                return 1;
+            }
         }
     }
 
     /**
-     * Read a record from the database. Each field/value pair from the result will be stored in a HashMap.
+     * Read a record from the database. Each field/value pair from the result will
+     * be stored in a HashMap.
      *
-     * @param table The name of the table
-     * @param key The record key of the record to read.
+     * @param table  The name of the table
+     * @param key    The record key of the record to read.
      * @param fields The list of fields to read, or null for all of them
      * @param result A HashMap of field/value pairs for the result
      * @return Zero on success, a non-zero error code on error or "not found".
      */
     @Override
-    @SuppressWarnings({"unchecked", "rawtypes"})
+    @SuppressWarnings({ "unchecked", "rawtypes" })
     public int read(String table, String key, Set<String> fields,
             HashMap<String, ByteIterator> result) {
         try {
-            MongoCollection<Document> collection = db[serverCounter++%db.length].getCollection(table);
-            Document q = new Document("_id", key);
+            MongoCollection<Document> collection = db[serverCounter++ % db.length].getCollection(table);
+            Document q = new Document(idField, key);
             Document fieldsToReturn;
 
             Document queryResult;
@@ -500,41 +596,42 @@ public class MongoDbClient extends DB {
                     fieldsToReturn.put(field, INCLUDE);
                 }
                 queryResult = collection.find(q).projection(fieldsToReturn).first();
-            }
-            else {
+            } else {
                 queryResult = collection.find(q).first();
             }
 
             if (queryResult != null) {
-                // TODO: this is wrong.  It is totally violating the expected type of the values in result, which is ByteIterator
+                // TODO: this is wrong. It is totally violating the expected type of the values
+                // in result, which is ByteIterator
                 // TODO: somewhere up the chain this should be resulting in a ClassCastException
                 result.putAll(new LinkedHashMap(queryResult));
                 return 0;
             }
             System.err.println("No results returned for key " + key);
             return 1;
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             System.err.println(e.toString());
             return 1;
         }
     }
 
     /**
-     * Update a record in the database. Any field/value pairs in the specified values HashMap will be written into the record with the specified
+     * Update a record in the database. Any field/value pairs in the specified
+     * values HashMap will be written into the record with the specified
      * record key, overwriting any existing values with the same field name.
      *
-     * @param table The name of the table
-     * @param key The record key of the record to write.
+     * @param table  The name of the table
+     * @param key    The record key of the record to write.
      * @param values A HashMap of field/value pairs to update in the record
-     * @return Zero on success, a non-zero error code on error. See this class's description for a discussion of error codes.
+     * @return Zero on success, a non-zero error code on error. See this class's
+     *         description for a discussion of error codes.
      */
     @Override
     public int update(String table, String key,
             HashMap<String, ByteIterator> values) {
         try {
-            MongoCollection<Document> collection = db[serverCounter++%db.length].getCollection(table);
-            Document q = new Document("_id", key);
+            MongoCollection<Document> collection = db[serverCounter++ % db.length].getCollection(table);
+            Document q = new Document(idField, key);
             Document u = new Document();
             Document fieldsToSet = new Document();
             for (String tmpKey : values.keySet()) {
@@ -552,34 +649,36 @@ public class MongoDbClient extends DB {
                 return 1;
             }
             return 0;
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             System.err.println(e.toString());
             return 1;
         }
     }
 
     /**
-     * Perform a range scan for a set of records in the database. Each field/value pair from the result will be stored in a HashMap.
+     * Perform a range scan for a set of records in the database. Each field/value
+     * pair from the result will be stored in a HashMap.
      *
-     * @param table The name of the table
-     * @param startkey The record key of the first record to read.
+     * @param table       The name of the table
+     * @param startkey    The record key of the first record to read.
      * @param recordcount The number of records to read
-     * @param fields The list of fields to read, or null for all of them
-     * @param result A Vector of HashMaps, where each HashMap is a set field/value pairs for one record
-     * @return Zero on success, a non-zero error code on error. See this class's description for a discussion of error codes.
+     * @param fields      The list of fields to read, or null for all of them
+     * @param result      A Vector of HashMaps, where each HashMap is a set
+     *                    field/value pairs for one record
+     * @return Zero on success, a non-zero error code on error. See this class's
+     *         description for a discussion of error codes.
      */
     @Override
     public int scan(String table, String startkey, int recordcount,
             Set<String> fields, Vector<HashMap<String, ByteIterator>> result) {
         MongoCursor<Document> cursor = null;
         try {
-            MongoCollection<Document> collection = db[serverCounter++%db.length].getCollection(table);
+            MongoCollection<Document> collection = db[serverCounter++ % db.length].getCollection(table);
             Document fieldsToReturn = null;
             // { "_id":{"$gte":startKey, "$lte":{"appId":key+"\uFFFF"}} }
             Document scanRange = new Document("$gte", startkey);
             Document q = new Document("_id", scanRange);
-            Document s = new Document("_id",INCLUDE);
+            Document s = new Document("_id", INCLUDE);
             if (fields != null) {
                 fieldsToReturn = new Document();
                 for (final String field : fields) {
@@ -603,15 +702,13 @@ public class MongoDbClient extends DB {
             }
 
             return 0;
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             System.err.println(e.toString());
             return 1;
-        }
-        finally {
-             if( cursor != null ) {
-                    cursor.close();
-             }
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
         }
 
     }
@@ -620,7 +717,7 @@ public class MongoDbClient extends DB {
      * TODO - Finish
      *
      * @param resultMap result map
-     * @param document source document
+     * @param document  source document
      */
     protected void fillMap(HashMap<String, ByteIterator> resultMap, Document document) {
         for (Map.Entry<String, Object> entry : document.entrySet()) {
