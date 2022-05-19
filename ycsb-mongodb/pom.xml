@@ -10,6 +10,27 @@
 
   <name>YCSB Root</name>
 
+<!--
+      // TODO temp remove once JAVA-4616
+      From https://github.com/mongodb/mongo-java-driver/blob/master/build.gradle#L76-L84
+        maven {
+            url 'https://oss.sonatype.org/content/repositories/snapshots'
+            content {
+                // Only include mongodb-crypt snapshots
+                includeGroup "org.mongodb"
+            }
+        }
+
+-->
+  <repositories>
+    <repository>
+      <id>my-repo1</id>
+      <name>your custom repo</name>
+      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+    </repository>
+  </repositories>
+
+
   <description>
     This is the top level project that builds, packages the core and all the DB bindings for YCSB infrastructure.
   </description>
