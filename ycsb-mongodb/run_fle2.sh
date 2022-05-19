@@ -1,7 +1,7 @@
 #!/bin/bash
 
 THREADS=16
-REPO=/home/mark/src/mongo
+REPO=/home/mark/mongo
 
 function run_load {
 
